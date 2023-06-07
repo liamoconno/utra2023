@@ -360,13 +360,23 @@ class Video_Dataset(torch.utils.data.Dataset):
         self.partition = partition
         self.trial_idx = cv_dict[fold][partition]
         self.video_datalist, self.neural_datalist = self.process_dfs(video_df, neural_df)
-        self.y_tensor = torch.tensor(np.concatenate(self.neural_datalist, axis=0))
+        # Make this more robust
+        self.aspect_ratio = (-(1056 // -self.subsample_scalar), -(1440 // -self.subsample_scalar))
+        self.y_tensor = self.scale_y_data()
         self.x_tensor = torch.tensor(np.concatenate(self.video_datalist, axis=0))
 
         self.x_size = self[0][0].shape[2]
         self.y_size = self.y_tensor.shape[1]
         # super().__init__()
     
+    '''
+    Generates scaled y data
+    '''
+    def scale_y_data(self):
+        scaler = StandardScaler()
+        y_tensor = torch.tensor(scaler.fit_transform(np.concatenate(self.neural_datalist, axis=0)))
+        return y_tensor
+
     def process_dfs(self, video_df, neural_df):
         videoData_list, neuralData_list = [], []
         for trial in self.trial_idx:
@@ -392,10 +402,14 @@ class Video_Dataset(torch.utils.data.Dataset):
             try:
                 time_stamp = float(time_stamp.numpy())
                 self.reader.seek(time_stamp)
-                frame = np.reshape(np.moveaxis(np.array(next(self.reader)['data']), 0, 2)[::self.subsample_scalar,::self.subsample_scalar,0] / 255.0, (1, -1))
+                frame = np.moveaxis(np.array(next(self.reader)['data']), 0, 2)[::self.subsample_scalar,::self.subsample_scalar,0] / 255.0
+                frame = np.reshape(frame, (1,-1))
                 frames.append(frame)
             except:
-                print("Warning: an exception occured")
+                # TODO: FIX UNDERLYING ISSUE!
+                print("Warning: an exception occured finding time_stamp: " + str(float(time_stamp.numpy())))
+                frame = np.random.rand(1, self.x_size)
+                frames.append(frame)
 
         
         return torch.tensor(frames), self.y_tensor[key,:]
@@ -415,20 +429,23 @@ class Video_Dataset(torch.utils.data.Dataset):
             for n in range(0, num_frames, step):
                 #curr_ax = axes[i//8, i%8] 
                 curr_ax = axes[i] 
-                curr_ax.imshow(frames[n])
+                curr_ax.imshow(np.reshape(frames[n], self.aspect_ratio))
                 i+=1
             return fig
         else:
-            plt.imshow(frames[0])
+            plt.imshow(np.reshape(frames[0], self.aspect_ratio))
     
     """
     Given time stamp(s), prints the frames at those timestamps
     """
     def print_frame_at_time(self, time_stamp, step=1):
-        frames = self[time_stamp]
+        time_stamp = float(time_stamp)
+        self.reader.seek(time_stamp)
+        frames = [np.moveaxis(np.array(next(self.reader)['data']), 0, 2)[::self.subsample_scalar,::self.subsample_scalar,0] / 255.0]
         fig = self.print_frames(frames, step)
         return fig
-
+    
+    
 # Utility function to load dataframes of preprocessed kinematic/neural data
 def load_mocap_df(data_path):
     kinematic_df = pd.read_pickle(data_path + 'kinematic_df.pkl')
