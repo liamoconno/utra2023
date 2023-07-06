@@ -45,6 +45,26 @@ class model_ann(nn.Module):
 
         return x
 
+#Simple feedforward ANN for decoding kinematics
+class model_cnn(nn.Module):
+    def __init__(self, input_size, output_size, layer_size, batch_size=100):
+        super(model_ann, self).__init__()
+        self.input_size,  self.layer_size, self.output_size, self.batch_size = input_size, layer_size, output_size, batch_size
+        
+        #List layer sizes
+        self.conv = torch.nn.Conv2d(input_size,layer_size)
+        self.layer_hidden = np.concatenate([[layer_size], layer_size, [output_size]])
+        
+        #Compile layers into lists
+        self.layer_list = nn.ModuleList(input_size, layer_size
+            [self.conv]+[nn.Linear(in_features=self.layer_hidden[idx], out_features=self.layer_hidden[idx+1]) for idx in range(len(self.layer_hidden)-1)] )   
+        def forward(self, x):
+            #Encoding step
+            for idx in range(len(self.layer_list)):
+                x = F.tanh(self.layer_list[idx](x))
+
+            return x
+
 #Helper function to pytorch train networks for decoding
 def train_model(model, optimizer, criterion, max_epochs, training_dataset, device, print_freq=10):
     print("Begun training")
