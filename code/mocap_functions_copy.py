@@ -316,9 +316,9 @@ class SEE_Dataset(torch.utils.data.Dataset):
 
     def __getitem__(self, slice_index):
         if self.flip_outputs:
-            return self.y_tensor[slice_index,:,:], self.X_tensor[slice_index,:,:]
+            return self.y_tensor[slice_index,:], self.X_tensor[slice_index,:]
         else:
-            return self.X_tensor[slice_index,:,:], self.y_tensor[slice_index,:,:]
+            return self.X_tensor[slice_index,:], self.y_tensor[slice_index,:]
 
     #**add functionality to separate eye, object, and body markers
     def process_dfs(self, kinematic_df, neural_df):
@@ -333,15 +333,22 @@ class SEE_Dataset(torch.utils.data.Dataset):
         return posData_list, neuralData_list
 
     def format_splits(self, data_list):
+#         data_tensor = torch.from_numpy(
+#             np.concatenate(
+#                 [np.pad(data_list[trial], ((self.window_size,self.window_size),(0,0)), mode='constant') for trial in range(self.num_trials)]
+#                 )  
+#             ).unfold(0, self.window_size, self.data_step_size).transpose(1,2)
+
         data_tensor = torch.from_numpy(
             np.concatenate(
-                [np.pad(data_list[trial], ((self.window_size,self.window_size),(0,0)), mode='constant') for trial in range(self.num_trials)]
+                [data_list[trial] for trial in range(self.num_trials)]
                 )  
-            ).unfold(0, self.window_size, self.data_step_size).transpose(1,2)
+            )
 
         return data_tensor
     
     def load_splits(self):
+        
         y_tensor = self.format_splits(self.neuralData_list)
 
         if self.kinematic_type == 'posData':
@@ -351,7 +358,8 @@ class SEE_Dataset(torch.utils.data.Dataset):
         #     y2 = self.format_splits(self.posData_list)
         #     y_tensor = torch.stack([y1, y2], dim=2)
 
-        X_tensor, y_tensor = X_tensor[:-self.split_offset,::self.data_step_size,:], y_tensor[self.split_offset:,::self.data_step_size,:]
+#         X_tensor, y_tensor = X_tensor[:-self.split_offset,::self.data_step_size,:], y_tensor[self.split_offset:,::self.data_step_size,:]
+
         assert X_tensor.shape[0] == y_tensor.shape[0]
         return X_tensor, y_tensor
 
