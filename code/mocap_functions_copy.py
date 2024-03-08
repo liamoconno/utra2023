@@ -24,6 +24,7 @@ import itertools
 scaler = StandardScaler()
 num_cores = multiprocessing.cpu_count()
 from tqdm.auto import tqdm
+import math
 
 #Simple feedforward ANN for decoding kinematics
 class model_ann(nn.Module):
@@ -374,9 +375,10 @@ class SEE_Dataset(torch.utils.data.Dataset):
             scaled_data_list.append(scaled_data_trial)
 
         return scaled_data_list
-
+    
+# Handles video data    
 class Video_Dataset(torch.utils.data.Dataset):
-    def __init__(self, cv_dict,  fold, partition, video_path, video_df, neural_df, subsample_scalar=1):
+    def __init__(self, cv_dict,  fold, partition, video_path, video_df, neural_df, subsample_scalar=1, load_from_pickle=True):
         self.video_path = video_path
         self.reader = torchvision.io.VideoReader(video_path, "video")
         self.md = self.reader.get_metadata()
@@ -387,24 +389,32 @@ class Video_Dataset(torch.utils.data.Dataset):
         self.fold = fold
         self.partition = partition
         self.trial_idx = cv_dict[fold][partition]
-        self.video_datalist, self.neural_datalist = self.process_dfs(video_df, neural_df)
+        self.load_from_pickle = load_from_pickle
+        self.video_datalist, self.neural_datalist, self.frame_datalist = self.process_dfs(video_df, neural_df)
         # Make this more robust
-        self.aspect_ratio = (-(1056 // -self.subsample_scalar), -(1440 // -self.subsample_scalar))
-        self.y_tensor = self.scale_y_data()
-        self.x_tensor = torch.tensor(np.concatenate(self.video_datalist, axis=0))
-
-        self.x_size = self[0][0].shape[2]
+        self.aspect_ratio = (math.floor(((1056-100+2*0)/subsample_scalar)+1),math.floor(((1440-100+2*0)/subsample_scalar)+1))
+        self.y_tensor, self.x_tensor = self.scale_data()
+        self.time_stamps = torch.tensor(np.concatenate(self.video_datalist, axis=0))
+        self.x_size = self[0][0].shape[1]
         self.y_size = self.y_tensor.shape[1]
+        
+
         # super().__init__()
     
     '''
     Generates scaled y data
     '''
-    def scale_y_data(self):
-        scaler = StandardScaler()
-        y_tensor = torch.tensor(scaler.fit_transform(np.concatenate(self.neural_datalist, axis=0)))
-        return y_tensor
-
+    def scale_data(self):
+        scaler_y = StandardScaler()
+        y_tensor = torch.tensor(scaler_y.fit_transform(np.concatenate(self.neural_datalist, axis=0)))
+        scaler_x = StandardScaler()
+        x = self.frame_datalist.numpy()
+        x_tensor = torch.tensor(scaler_x.fit_transform(x.reshape(-1, x.shape[-1])).reshape(x.shape))
+        return y_tensor, x_tensor
+    
+    '''
+    Generates processed data
+    '''
     def process_dfs(self, video_df, neural_df):
         videoData_list, neuralData_list = [], []
         for trial in self.trial_idx:
@@ -414,9 +424,56 @@ class Video_Dataset(torch.utils.data.Dataset):
                 neuralData_array = np.stack(neural_df['rates'][neural_df['trial'] == trial].values).squeeze().transpose() 
 
                 videoData_list.append(videoData_array)
-                neuralData_list.append(neuralData_array)
+                neuralData_list.append(neuralData_array) 
+        
+        if self.load_from_pickle:
+            frame_data_list = self.load_frame_datalist(video_df)
+        else:
+            frame_data_list = self.save_frame_datalist(video_df)
+        
+        frame_data_list = frame_data_list.reshape([-1,1, frame_data_list.shape[2]])
+        return videoData_list, neuralData_list, frame_data_list
+    
+    '''
+    Helper function for pickling frame data
+    '''
+    def save_frame_datalist(self, video_df):
+        frame_data_list = list()
+        pooler = torch.nn.AvgPool2d(kernel_size=100, stride=self.subsample_scalar)
+        # For each trial in the partition, save all frames as a pickle and add to returned data list
+        for idx in self.trial_idx:
+            if idx != 217:
+                print(idx, end=' ')
+                frame_times = video_df['timeStamps'][idx]
+                frame_trial = list()
+                for ftime in frame_times:
+                    self.reader.seek(ftime - cam_start)
+                    frame = next(self.reader)
+                    frame_pooled = pooler(frame['data'].float())
+                    frame_trial.append(frame_pooled[0, :, :].reshape(-1))
 
-        return videoData_list, neuralData_list
+                frame_data_list.append(torch.stack(frame_trial))
+                with open(f'../data/SPK20220308/frames/frame_trial{idx}', 'wb') as handle:
+                    pickle.dump(torch.stack(frame_trial), handle, protocol=pickle.HIGHEST_PROTOCOL)
+        return torch.stack(frame_data_list)
+        
+    '''
+    Helper function for unpickling frame data
+    '''
+    def load_frame_datalist(self, video_df):
+        frame_data_list = []
+        # For each trial in the partition, load the frames from pickle and append to our returned data list
+        for idx in self.trial_idx:
+            # Still throwing away 217
+            if idx != 217:
+                print(idx, end=' ')
+                with open(f'../data/SPK20220308/frames/frame_trial{idx}', 'rb') as handle:
+                     frame_trial = pickle.load(handle)
+                frame_data_list.append(frame_trial)
+#         print(f'Frame list length: {len(frame_data_list)}')
+        return torch.stack(frame_data_list)
+                
+                
     '''
     Allows time indexing (s) into videos, returns relevant frames. Note that 
     indexes must be floats.
@@ -424,24 +481,9 @@ class Video_Dataset(torch.utils.data.Dataset):
     Returns list(np.array)
     '''
     def __getitem__(self, key):
-        frames = []
-        
-        for time_stamp in self.x_tensor[key]:
-            try:
-                time_stamp = float(time_stamp.numpy())
-                self.reader.seek(time_stamp)
-                frame = np.moveaxis(np.array(next(self.reader)['data']), 0, 2)[::self.subsample_scalar,::self.subsample_scalar,0] / 255.0
-                frame = np.reshape(frame, (1,-1))
-                frames.append(frame)
-            except:
-                # TODO: FIX UNDERLYING ISSUE!
-                print("Warning: an exception occured finding time_stamp: " + str(float(time_stamp.numpy())))
-                frame = np.random.rand(1, self.x_size)
-                frames.append(frame)
-
-        
-        return torch.tensor(frames), self.y_tensor[key,:]
-
+        return self.x_tensor[key], self.y_tensor[key,:]
+            
+            
 
     def __len__(self):
         return self.y_tensor.shape[0]
@@ -450,30 +492,97 @@ class Video_Dataset(torch.utils.data.Dataset):
     Given frames, print them
     """
     def print_frames(self, frames, step=1):
-        num_frames = len(frames)
+        num_frames = frames.shape[0]
         if num_frames > 1:
             fig, axes = plt.subplots(nrows=1, ncols= -(num_frames // -step), figsize=(24,24))
             i=0
             for n in range(0, num_frames, step):
                 #curr_ax = axes[i//8, i%8] 
-                curr_ax = axes[i] 
+                curr_ax = axes[i]
                 curr_ax.imshow(np.reshape(frames[n], self.aspect_ratio))
                 i+=1
             return fig
         else:
+            fig = plt.figure()
             plt.imshow(np.reshape(frames[0], self.aspect_ratio))
-    
+            plt.grid(None)
+            return fig
+            
     """
-    Given time stamp(s), prints the frames at those timestamps
+    Print the unblurred frames
     """
-    def print_frame_at_time(self, time_stamp, step=1):
-        time_stamp = float(time_stamp)
-        self.reader.seek(time_stamp)
-        frames = [np.moveaxis(np.array(next(self.reader)['data']), 0, 2)[::self.subsample_scalar,::self.subsample_scalar,0] / 255.0]
-        fig = self.print_frames(frames, step)
-        return fig
+    def print_original_frames(self, frame_ids):
+        frame_times = self.time_stamps[frame_ids]
+        num_frames = frame_times.shape[0]
+        frames = []
+        if num_frames > 1:
+            step=1
+            fig, axes = plt.subplots(nrows=1, ncols= -(num_frames // -step), figsize=(24,24))
+            i=0
+            for time_stamp in frame_times:
+                self.reader.seek(time_stamp - cam_start)
+                frame = np.moveaxis(np.array(next(self.reader)['data']), 0, 2)
+                curr_ax = axes[i] 
+                curr_ax.imshow(frame)
+                i+=1
+            return
+        else:
+            fig = plt.figure()
+            self.reader.seek(frame_times[0] - cam_start)
+            frame = np.moveaxis(np.array(next(self.reader)['data']), 0, 2)
+            plt.imshow(frame)
+            plt.grid(None)
+            return fig
     
+
+# Handles multimodal data    
+class Video_Kinematic_Dataset(torch.utils.data.Dataset):
+    def __init__(self, cv_dict,  fold, partition, video_path, kinematic_df, video_df, neural_df, offset, 
+                 window_size, data_step_size, device, predict_kinematics, subsample_scalar=1, load_from_pickle=True):
+        self.cv_dict = cv_dict
+        self.partition = partition
+        self.fold = fold
+        self.cv_dict[fold][partition]=np.delete(cv_dict[fold][partition], np.where(cv_dict[fold][partition]==217))
+        self.video_dataset = Video_Dataset(cv_dict,  fold, partition, video_path, video_df, neural_df, subsample_scalar=1, load_from_pickle=True)
+        self.kinematic_dataset = SEE_Dataset(cv_dict, fold, partition, kinematic_df, neural_df, offset, window_size, 
+                                            data_step_size, device, 'posData', True, predict_kinematics)
+        self.x_kin = None
+        self.x_vid = None
+        self.y_data, self.x_data = self.scale_data()
+        self.separate_by_trial()
+        
+    #TODO CHECK THAT VIDEO AND KINEMATIC DATASETS ARE ALIGNED!
+    # ALSO CHECK IF THIS NEEDS TO BE NORMALIZED!
+    def __getitem__(self, key):
+        return self.x_data[key], self.y_data[key]
     
+    def __len__(self):
+        return len(self.video_dataset)
+    
+    def scale_data(self):
+        video_data = self.video_dataset[:][0][:,-1,:]
+        neural_data = self.video_dataset[:][1]
+        kinematic_data = self.kinematic_dataset[:][0]
+        #FIX THIS! I THINK WE'RE STACKING HORIZONTALLY, I.E. WE'RE PROVIDING VIDEO AND MOTION SEQUENTIALLY
+        y_data, x = neural_data, np.concatenate((video_data, kinematic_data), axis=1)
+    
+        scaler_x = StandardScaler()
+        scaler_x_vid = StandardScaler()
+        scaler_x_kin = StandardScaler()
+        # HOW TO HANDLE SCALING??
+        #Scale the combined data
+        x_data = torch.tensor(scaler_x.fit_transform(x.reshape(-1, x.shape[-1])).reshape(x.shape))
+        # Scale the separate video and kinematic data separately
+        self.x_kin = torch.tensor(scaler_x_kin.fit_transform(kinematic_data.reshape(-1, kinematic_data.shape[-1])).reshape(kinematic_data.shape))
+        self.x_vid = torch.tensor(scaler_x_vid.fit_transform(video_data.reshape(-1, video_data.shape[-1])).reshape(video_data.shape))
+        return y_data, x_data
+    
+    # Probably want to pull trial by trial
+    def separate_by_trial(self):
+        num_trials = len(self.cv_dict[self.fold][self.partition])
+        self.x_vid.reshape(-1, num_trials)
+        self.x_kin.reshape(-1, num_trials)
+        
 # Utility function to load dataframes of preprocessed kinematic/neural data
 def load_mocap_df(data_path):
     kinematic_df = pd.read_pickle(data_path + 'kinematic_df.pkl')
