@@ -376,7 +376,8 @@ class SEE_Dataset(torch.utils.data.Dataset):
 
         return scaled_data_list
     
-# Handles video data    
+# Handles video data
+# TODO- handle instructed delay
 class Video_Dataset(torch.utils.data.Dataset):
     def __init__(self, cv_dict,  fold, partition, video_path, video_df, neural_df, subsample_scalar=1, load_from_pickle=True):
         self.video_path = video_path
